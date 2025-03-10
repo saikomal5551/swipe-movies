@@ -1,129 +1,118 @@
-import { WebSocketServer } from 'ws';
-import fetch from 'node-fetch';
-import { v4 as uuidv4 } from 'uuid';
+const express = require("express");
+const cors = require("cors");
+const dotenv = require("dotenv");
+const mongoose = require("mongoose");
+const connectDB = require("./db");
 
-const wss = new WebSocketServer({ port: 3000 });
+dotenv.config();
+const app = express();
 
-// Store active sessions
-const sessions = new Map();
+// ✅ Middleware
+app.use(cors());
+app.use(express.json());
 
-// Store user preferences and matches
-const sessionPreferences = new Map();
+// ✅ Connect MongoDB
+connectDB()
+    .then(() => console.log("✅ MongoDB Connected Successfully"))
+    .catch((err) => console.error("❌ MongoDB Connection Error:", err));
 
-const OMDB_API_KEY = '4272569c'; // Replace with your API key
-
-// Function to fetch random popular movies
-async function getRandomMovie() {
-    // List of popular movie IDs to choose from
-    const popularMovieIds = [
-        'tt0111161', 'tt0068646', 'tt0071562', 'tt0468569', 
-        'tt0050083', 'tt0108052', 'tt0167260', 'tt0110912'
-    ];
-    
-    const randomId = popularMovieIds[Math.floor(Math.random() * popularMovieIds.length)];
-    const response = await fetch(`http://www.omdbapi.com/?i=${randomId}&apikey=${OMDB_API_KEY}`);
-    return await response.json();
-}
-
-// Handle WebSocket connections
-wss.on('connection', (ws) => {
-    console.log('New client connected');
-
-    ws.on('message', async (message) => {
-        const data = JSON.parse(message);
-        
-        switch (data.type) {
-            case 'create_session':
-                const sessionId = uuidv4();
-                sessions.set(sessionId, [ws]);
-                sessionPreferences.set(sessionId, { likes: new Map(), matches: [] });
-                ws.sessionId = sessionId;
-                ws.send(JSON.stringify({
-                    type: 'session_created',
-                    sessionId
-                }));
-                break;
-
-            case 'join_session':
-                const session = sessions.get(data.sessionId);
-                if (session && session.length < 2) {
-                    session.push(ws);
-                    ws.sessionId = data.sessionId;
-                    
-                    // Notify both users that partner joined
-                    session.forEach(client => {
-                        client.send(JSON.stringify({
-                            type: 'partner_joined'
-                        }));
-                    });
-
-                    // Send first movie
-                    const movie = await getRandomMovie();
-                    session.forEach(client => {
-                        client.send(JSON.stringify({
-                            type: 'new_movie',
-                            movie
-                        }));
-                    });
-                }
-                break;
-
-            case 'swipe':
-                const currentSession = sessions.get(data.sessionId);
-                const preferences = sessionPreferences.get(data.sessionId);
-                
-                if (!preferences.likes.has(data.movieId)) {
-                    preferences.likes.set(data.movieId, new Set());
-                }
-                
-                if (data.direction === 'right') {
-                    preferences.likes.get(data.movieId).add(ws);
-                    
-                    // Check if both users liked the movie
-                    if (preferences.likes.get(data.movieId).size === 2) {
-                        const matchedMovie = await fetch(`http://www.omdbapi.com/?i=${data.movieId}&apikey=${OMDB_API0_KEY}`)
-                            .then(res => res.json());
-                        
-                        preferences.matches.push(matchedMovie);
-                        currentSession.forEach(client => {
-                            client.send(JSON.stringify({
-                                type: 'match',
-                                movie: matchedMovie
-                            }));
-                        });
-                    }
-                }
-
-                // Send next movie
-                const nextMovie = await getRandomMovie();
-                currentSession.forEach(client => {
-                    client.send(JSON.stringify({
-                        type: 'new_movie',
-                        movie: nextMovie
-                    }));
-                });
-                break;
-        }
-    });
-
-    ws.on('close', () => {
-        console.log('Client disconnected');
-        if (ws.sessionId) {
-            const session = sessions.get(ws.sessionId);
-            if (session) {
-                // Notify other user that partner left
-                session.forEach(client => {
-                    if (client !== ws && client.readyState === WebSocket.OPEN) {
-                        client.send(JSON.stringify({
-                            type: 'partner_left'
-                        }));
-                    }
-                });
-                sessions.delete(ws.sessionId);
-                sessionPreferences.delete(ws.sessionId);
-            }
-        }
-    });
+// ✅ Test Route
+app.get("/", (req, res) => {
+    res.send("🎬 Swipe Movies Backend is Running!");
 });
 
-console.log('WebSocket server running on port 3000');
+// ✅ Define Movie Schema & Model
+const movieSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    year: { type: Number, required: true }
+});
+const Movie = mongoose.model("Movie", movieSchema);
+
+// ✅ API Route to get all movies
+app.get("/api/movies", async (req, res) => {
+    try {
+        const movies = await Movie.find();
+        res.json(movies);
+    } catch (error) {
+        console.error("❌ Error fetching movies:", error);
+        res.status(500).json({ message: "Error fetching movies", error });
+    }
+});
+
+// ✅ API Route to add a new movie
+app.post("/api/movies", async (req, res) => {
+    const { title, year } = req.body;
+    if (!title || !year) return res.status(400).json({ message: "Title and year are required" });
+
+    try {
+        const newMovie = new Movie({ title, year });
+        await newMovie.save();
+        res.status(201).json(newMovie);
+    } catch (error) {
+        console.error("❌ Error adding movie:", error);
+        res.status(500).json({ message: "Error adding movie", error });
+    }
+});
+
+// ✅ Define Liked Movie Schema & Model
+const likedMovieSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    year: { type: Number, required: true },
+    runtime: { type: String },
+    genre: { type: String },
+    poster: { type: String },
+    plot: { type: String },
+    likedBy: { type: String, required: true } // Store user identifier
+}, { timestamps: true });
+
+const LikedMovie = mongoose.model("LikedMovie", likedMovieSchema);
+
+// ✅ API Route to save a liked movie
+app.post("/api/movies/like", async (req, res) => {
+    const { title, year, runtime, genre, poster, plot, likedBy } = req.body;
+    
+    if (!title || !year || !likedBy) {
+        return res.status(400).json({ message: "Title, year, and likedBy are required" });
+    }
+
+    try {
+        // 🔍 Check if the movie is already liked by the user
+        const existingLike = await LikedMovie.findOne({ title, likedBy });
+        if (existingLike) {
+            return res.status(400).json({ message: "You have already liked this movie" });
+        }
+
+        if (existingLike) {
+            return res.status(400).json({ message: "You have already liked this movie" });
+        }
+
+
+        if (existingLike) {
+            return res.status(400).json({ message: "You have already liked this movie" });
+        }
+
+        console.log(`Movie liked: ${title}, liked by: ${likedBy}`); // Log the liked movie details
+        const likedMovie = new LikedMovie({ title, year, runtime, genre, poster, plot, likedBy });
+
+        await likedMovie.save();
+        res.status(201).json({ message: "✅ Movie liked successfully", likedMovie });
+    } catch (error) {
+        console.error("❌ Error saving liked movie:", error);
+        res.status(500).json({ message: "Error saving liked movie", error });
+    }
+});
+
+// ✅ API Route to fetch all liked movies
+app.get("/api/movies/liked", async (req, res) => {
+    try {
+        const likedMovies = await LikedMovie.find();
+        res.json(likedMovies);
+    } catch (error) {
+        console.error("❌ Error fetching liked movies:", error);
+        res.status(500).json({ message: "Error fetching liked movies", error });
+    }
+});
+
+// ✅ Start Server
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
